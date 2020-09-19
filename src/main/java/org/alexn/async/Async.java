@@ -1,9 +1,15 @@
 package org.alexn.async;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
-import java.util.function.*;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * The `Async` data type is a lazy `Future`, i.e. a way to describe
@@ -44,8 +50,9 @@ public interface Async<A> {
    * (defined above).
    */
   default CompletableFuture<A> toFuture(Executor executor) {
-    // TODO
-    throw new UnsupportedOperationException("Please implement!");
+    CompletableFuture<A> future = new CompletableFuture<>();
+    run(executor, future::complete);
+    return future;
   }
 
   /**
@@ -72,8 +79,8 @@ public interface Async<A> {
    * an `Async<B>` that's defined in terms of `self.run`.
    */
   default <B> Async<B> map(Function<A, B> f) {
-    // TODO
-    throw new UnsupportedOperationException("Please implement!");
+    // The solution of using executor.execute(() -> ...) twice was provided by @vasilmkd
+    return (executor, cb) -> executor.execute(() -> run(executor, a -> executor.execute(() -> cb.onSuccess(f.apply(a)))));
   }
 
   /**
@@ -100,8 +107,7 @@ public interface Async<A> {
    * an `Async<B>` that's defined in terms of `self.run`.
    */
   default <B> Async<B> flatMap(Function<A, Async<B>> f) {
-    // TODO
-    throw new UnsupportedOperationException("Please implement!");
+    return (executor, cb) -> executor.execute(() -> run(executor, a -> executor.execute(() -> f.apply(a).run(executor, cb))));
   }
 
   /**
@@ -131,8 +137,26 @@ public interface Async<A> {
    * @param f is the function used to transform the final result
    */
   static <A, B, C> Async<C> parMap2(Async<A> fa, Async<B> fb, BiFunction<A, B, C> f) {
-    // TODO
-    throw new UnsupportedOperationException("Please implement!");
+    return (executor, cb) -> {
+      AtomicReference<Object> result = new AtomicReference<>();
+
+      fa.run(executor, a -> {
+        // The solution of using AtomicReference.getAndSet was provided by @vasilmkd
+        Object otherResult = result.getAndSet(a);
+        if (otherResult != null) {
+          //noinspection unchecked
+          cb.onSuccess(f.apply(a, (B) otherResult));
+        }
+      });
+
+      fb.run(executor, b -> {
+        Object otherResult = result.getAndSet(b);
+        if (otherResult != null) {
+          //noinspection unchecked
+          cb.onSuccess(f.apply((A) otherResult, b));
+        }
+      });
+    };
   }
 
   /**
@@ -149,8 +173,15 @@ public interface Async<A> {
    * Any implementation is accepted, as long as it works.
    */
   static <A> Async<List<A>> sequence(List<Async<A>> list) {
-    // TODO
-    throw new UnsupportedOperationException("Please implement!");
+    return (executor, cb) -> sequenceRecursive(list, 0, Collections.emptyList()).run(executor, cb);
+  }
+
+  static <A> Async<List<A>> sequenceRecursive(List<Async<A>> list, int index, List<A> result) {
+    if (index < list.size() - 1) {
+      return list.get(index).flatMap(a -> sequenceRecursive(list, index + 1, ListUtils.concat(result, a)));
+    } else {
+      return list.get(index).map(a -> ListUtils.concat(result, a));
+    }
   }
 
   /**
@@ -167,8 +198,18 @@ public interface Async<A> {
    * Any implementation is accepted, as long as it works.
    */
   static <A> Async<List<A>> parallel(List<Async<A>> list) {
-    // TODO
-    throw new UnsupportedOperationException("Please implement!");
+    return (executor, cb) -> {
+      CopyOnWriteArrayList<A> results = new CopyOnWriteArrayList<>();
+
+      for (Async<A> aAsync : list) {
+        aAsync.run(executor, e -> {
+          results.add(e);
+          if (results.size() == list.size()) {
+            cb.onSuccess(results);
+          }
+        });
+      }
+    };
   }
 
   /**
@@ -222,6 +263,12 @@ public interface Async<A> {
    * See {@link Async#eval(Supplier)} for inspiration
    */
   static <A> Async<A> fromFuture(Supplier<CompletableFuture<A>> f) {
-    throw new UnsupportedOperationException("Please implement!");
+    return create((executor, cb) -> f.get().whenCompleteAsync((a, throwable) -> {
+      if (throwable != null) {
+        cb.onError(throwable);
+      } else {
+        cb.onSuccess(a);
+      }
+    }, executor));
   }
 }
